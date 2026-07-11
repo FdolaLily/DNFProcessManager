@@ -52,6 +52,10 @@
 
 `DNFAutoFire.exe` 和 `config.ini` 必须放在同一个目录。
 
+`DNFAutoFire` 是基于 DAF 的 chenyu 魔改版 DNF 连发工具，支持仅在 DNF 游戏窗口内激活的多键无冲突连发、配置切换、10ms 高精度连发脉冲和多键动态错峰，并通过停止、切换配置及退出时统一补释放按键来降低卡键风险。
+
+- 源码与完整说明：[FdolaLily/DNFAutoFire](https://github.com/FdolaLily/DNFAutoFire)
+
 `config.ini` 保存连发按键、预设和快捷键。可以直接使用随发布版提供的默认配置；需要调整时，建议先复制一份作为备份，再修改原文件。
 
 更新发布文件时，如果你已经修改过 `config.ini`，请先备份自己的版本，避免被新版默认配置覆盖。
