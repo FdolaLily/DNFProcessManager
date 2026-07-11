@@ -1,222 +1,544 @@
+using System.ComponentModel;
 using System.Diagnostics;
-using System.Management;
+using Microsoft.Extensions.Options;
 
 namespace AutoManagerProcess;
 
-public class Worker() : BackgroundService
+public sealed class Worker(
+    ILogger<Worker> logger,
+    IOptionsMonitor<ManagerOptions> options) : BackgroundService
 {
-    //WIN11开启效率模式
-
-    private readonly ILogger<Worker> _logger;
-
-    private readonly IConfiguration _config;
-
-    private ManagementEventWatcher? _watcher;
-
-
-    public Worker(ILogger<Worker> logger) : this()
-    {
-        _logger = logger;
-
-        string directoryPath = AppDomain.CurrentDomain.BaseDirectory;
-
-        var builder = new ConfigurationBuilder()
-            .SetBasePath(directoryPath)
-            .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
-            .Build();
-        _config = builder;
-    }
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        try
+        logger.LogInformation("Process manager started");
+
+        while (!stoppingToken.IsCancellationRequested)
         {
-            while (!stoppingToken.IsCancellationRequested)
+            DetectedGame? detectedGame = null;
+            try
             {
-                stoppingToken.ThrowIfCancellationRequested();
+                detectedGame = await WaitForGameStartAsync(stoppingToken);
+                await MonitorGameLifecycleAsync(detectedGame, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception exception)
+            {
+                logger.LogError(exception, "Process manager iteration failed; it will retry");
+                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+            }
+            finally
+            {
+                detectedGame?.Process.Dispose();
+            }
+        }
+    }
 
-                if (_logger.IsEnabled(LogLevel.Information))
-                {
-                    _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
-                }
-
-                if (_watcher == null)
-                {
-                    string processName = _config["ProcessName"] ?? "DNF.exe";
-                    string queryStr =
-                        $"SELECT * FROM __InstanceCreationEvent WITHIN 1 WHERE TargetInstance ISA 'Win32_Process' AND TargetInstance.Name = '{processName}'";
-
-                    var query = new WqlEventQuery(queryStr);
-                    var scope = new ManagementScope("\\\\.\\root\\cimv2");
-                    _watcher = new ManagementEventWatcher(scope, query);
-                    var token = stoppingToken;
-                    _watcher.EventArrived += async (sender, e) =>
-                    {
-                        AutoStart();
-
-                        int delay = _config.GetSection("Delay").Get<Int32>();
-                        if (delay <= 0)
-                            delay = 60;
-
-                        //延时执行
-                        await Task.Delay(TimeSpan.FromSeconds(delay), token);
-
-                        KillProcess();
-
-                        LimitSGuard();
-
-                    };
-
-                    _watcher.Start();
-                }
-
-                await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
+    private async Task<DetectedGame> WaitForGameStartAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            var current = options.CurrentValue;
+            var normalizedName = NormalizeProcessName(current.ProcessName);
+            var process = FindGameProcess(normalizedName);
+            if (process is not null)
+            {
+                return new DetectedGame(process, normalizedName, process.Id, process.SessionId);
             }
 
+            await Task.Delay(
+                TimeSpan.FromSeconds(Math.Max(1, current.ProcessPollSeconds)),
+                cancellationToken);
         }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+    }
+
+    private async Task MonitorGameLifecycleAsync(
+        DetectedGame game,
+        CancellationToken serviceCancellationToken)
+    {
+        var startupOptions = options.CurrentValue;
+        logger.LogInformation(
+            "Detected {ProcessName} ({ProcessId}) startup in user session {SessionId}",
+            game.ProcessName,
+            game.ProcessId,
+            game.SessionId);
+
+        using var lifecycleCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(serviceCancellationToken);
+        var actionTask = RunGameStartActionsAsync(
+            startupOptions,
+            game.SessionId,
+            lifecycleCancellation.Token);
+        var priorityTask = MaintainGamePriorityAsync(
+            game.Process,
+            game.ProcessName,
+            game.ProcessId,
+            lifecycleCancellation.Token);
+
+        var gameExited = false;
+        try
         {
-            stoppingToken = new CancellationToken();
-        }
-        catch (Exception e)
-        {
-            _logger.LogError(e, "{Message}", e.Message);
-            Environment.Exit(1);
+            await WaitForGameExitAsync(game, serviceCancellationToken);
+            gameExited = true;
+            logger.LogInformation(
+                "Detected {ProcessName} ({ProcessId}) exit from user session {SessionId}",
+                game.ProcessName,
+                game.ProcessId,
+                game.SessionId);
         }
         finally
         {
-            _watcher?.Stop();
-            _watcher?.Dispose();
+            lifecycleCancellation.Cancel();
+            await Task.WhenAll(actionTask, priorityTask);
         }
-    }
 
-    private void LimitSGuard()
-    {
-        var limitList = _config.GetSection("LimitList").Get<List<string>>()
-            ?? ["SGuard64.exe", "SGuardSvc64.exe"];
-        foreach (var processName in limitList)
+        if (gameExited && !IsProcessRunningInSession(game.ProcessName, game.SessionId))
         {
-            var ps = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(processName));
-
-            foreach (var process in ps)
-            {
-                //设置进程优先级为最低 有可能造成死锁导致不稳定
-                //process.PriorityClass = ProcessPriorityClass.Idle;
-
-                //设置亲和性为最后一个CPU
-                SetLastCpuAffinity(process);
-
-                //设置I/0优先级为最低
-                if (IsGreaterWindows8()) PInvoke.SetIoPriority(process.Id, _logger);
-
-
-                //bool efficiencyMode = _config.GetSection("EfficiencyMode").Get<bool>();
-                //设置为效率模式 有可能导致不稳定
-                //if (IsGreaterWindows11() && efficiencyMode) PInvoke.SetEfficiencyMode(process.Id, _logger);
-
-            }
+            StopConfiguredApplications(options.CurrentValue.AutoStop, game.SessionId);
         }
     }
 
-    private void SetLastCpuAffinity(Process process)
+    private async Task WaitForGameExitAsync(
+        DetectedGame game,
+        CancellationToken cancellationToken)
     {
-        //获取当前进程的CPU亲和性掩码
-        var affinityMask = process.ProcessorAffinity;
-        //获取允许运行的CPU列表
-        var cpuCount = Environment.ProcessorCount;
-        var allowedCpus = Enumerable.Range(0, cpuCount)
-            .Where(cpu => (affinityMask.ToInt64() & (1L << cpu)) != 0)
-            .ToList();
-
-        if (allowedCpus.Count <= 0) return;
-
-        var newAffinityMask = (IntPtr)(1L << allowedCpus.Last());
-        process.ProcessorAffinity = newAffinityMask;
-    }
-
-    private void AutoStart()
-    {
-        var processList = _config.GetSection("AutoStart").Get<List<string>>();
-
-        if (processList == null)
-        {
-            _logger.LogWarning("No process to start");
-            return;
-        }
-
-        foreach (var processName in processList)
-        {
-            if (!File.Exists(processName))
-            {
-                _logger.LogWarning("cannot find this file {process}", processName);
-                continue;
-            }
-            var tmp = Path.GetFileNameWithoutExtension(processName);
-            //判断是否存在
-            _logger.LogInformation("current process {tmp}", tmp);
-            var isExist = Process.GetProcessesByName(tmp).Length > 0;
-            if (isExist)
-            {
-                _logger.LogInformation("process is ready exist");
-                continue;
-            }
-
-            //启动该程序
-            try
-            {
-                PInvoke.StartInteractiveProcess(processName, _logger);
-
-                _logger.LogInformation("Process {ProcessName} has been ran", processName);
-            }
-            catch (Exception e)
-            {
-                _logger.LogError(e, "Failed to start {ProcessName}", processName);
-            }
-        }
-    }
-
-    private void KillProcess()
-    {
-        var processList = _config.GetSection("KillList").Get<List<string>>() ??
-                          ["GameLoader.exe", "TXPlatform.exe", "ace-loader.exe"];
         try
         {
-            foreach (var processName in processList)
+            await game.Process.WaitForExitAsync(cancellationToken);
+        }
+        catch (Win32Exception exception)
+        {
+            logger.LogWarning(
+                exception,
+                "Could not wait on {ProcessName} ({ProcessId}) directly; falling back to exit polling",
+                game.ProcessName,
+                game.ProcessId);
+            await WaitForGameExitByPollingAsync(game, cancellationToken);
+        }
+        catch (InvalidOperationException)
+        {
+            await WaitForGameExitByPollingAsync(game, cancellationToken);
+        }
+    }
+
+    private async Task WaitForGameExitByPollingAsync(
+        DetectedGame game,
+        CancellationToken cancellationToken)
+    {
+        while (IsProcessRunningInSession(
+                   game.ProcessName,
+                   game.SessionId,
+                   game.ProcessId))
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+        }
+    }
+
+    private async Task RunGameStartActionsAsync(
+        ManagerOptions current,
+        int gameSessionId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await StartConfiguredApplicationsAsync(
+                current.AutoStart,
+                gameSessionId,
+                cancellationToken);
+
+            if (current.ActionDelaySeconds > 0)
             {
-                var ps = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(processName));
-                // 同名进程可能有多个
-                foreach (var process in ps)
+                await Task.Delay(
+                    TimeSpan.FromSeconds(current.ActionDelaySeconds),
+                    cancellationToken);
+            }
+
+            KillConfiguredProcesses(current.KillList);
+            LimitConfiguredProcesses(current.LimitList);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            logger.LogDebug("Cancelled delayed game-start actions because the game or service stopped");
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "Game-start actions failed");
+        }
+    }
+
+    private async Task MaintainGamePriorityAsync(
+        Process gameProcess,
+        string processName,
+        int processId,
+        CancellationToken cancellationToken)
+    {
+        var successLogged = false;
+        var failureLogged = false;
+
+        try
+        {
+            var intervalSeconds = Math.Max(1, options.CurrentValue.ProcessPollSeconds);
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(intervalSeconds));
+
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                var current = options.CurrentValue;
+                if (current.OptimizeGamePriority &&
+                    Enum.TryParse<ProcessPriorityClass>(
+                        current.GamePriority,
+                        ignoreCase: true,
+                        out var targetPriority) &&
+                    targetPriority is ProcessPriorityClass.Normal or ProcessPriorityClass.AboveNormal)
                 {
-                    _logger.LogInformation($"Current ProcessName {processName}");
-                    process.Kill();
-                    _logger.LogInformation($"Process {process.ProcessName} has been killed");
+                    try
+                    {
+                        var previousPriority = gameProcess.PriorityClass;
+                        if (previousPriority != targetPriority)
+                        {
+                            gameProcess.PriorityClass = targetPriority;
+                            gameProcess.Refresh();
+                            if (gameProcess.PriorityClass != targetPriority)
+                            {
+                                throw new InvalidDataException(
+                                    $"The process reported priority {gameProcess.PriorityClass} after the change.");
+                            }
+                        }
+
+                        failureLogged = false;
+                        if (!successLogged)
+                        {
+                            successLogged = true;
+                            logger.LogInformation(
+                                "Game priority is {Priority} for {ProcessName} ({ProcessId}); previous priority was {PreviousPriority}",
+                                targetPriority,
+                                processName,
+                                processId,
+                                previousPriority);
+                        }
+                        else if (previousPriority != targetPriority)
+                        {
+                            logger.LogDebug(
+                                "Restored game priority {Priority} for {ProcessName} ({ProcessId})",
+                                targetPriority,
+                                processName,
+                                processId);
+                        }
+                    }
+                    catch (InvalidOperationException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        return;
+                    }
+                    catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        if (!failureLogged)
+                        {
+                            failureLogged = true;
+                            logger.LogWarning(
+                                exception,
+                                "Could not set game priority for {ProcessName} ({ProcessId}); the game will continue normally",
+                                processName,
+                                processId);
+                        }
+                    }
+                }
+
+                if (!await timer.WaitForNextTickAsync(cancellationToken))
+                {
+                    break;
                 }
             }
         }
-        catch (Exception e)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            _logger.LogError($"KillProcess Error :{e.Message}");
+            // Expected when the game or service stops.
         }
-        
+        catch (Exception exception)
+        {
+            logger.LogWarning(
+                exception,
+                "Game priority monitoring stopped for {ProcessName} ({ProcessId}); game exit monitoring remains active",
+                processName,
+                processId);
+        }
     }
 
-    private bool IsGreaterWindows11()
+    private async Task StartConfiguredApplicationsAsync(
+        IEnumerable<string> applicationPaths,
+        int gameSessionId,
+        CancellationToken cancellationToken)
     {
-        return IsWindowsVersionOrGreater(10, 0, 22000);
+        foreach (var configuredPath in applicationPaths.Where(x => !string.IsNullOrWhiteSpace(x)))
+        {
+            string applicationPath;
+            try
+            {
+                var expandedPath = Environment.ExpandEnvironmentVariables(configuredPath.Trim());
+                applicationPath = Path.IsPathFullyQualified(expandedPath)
+                    ? Path.GetFullPath(expandedPath)
+                    : Path.GetFullPath(expandedPath, AppContext.BaseDirectory);
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning(exception, "Invalid AutoStart path: {Path}", configuredPath);
+                continue;
+            }
+
+            if (!File.Exists(applicationPath))
+            {
+                logger.LogWarning("AutoStart file does not exist: {Path}", applicationPath);
+                continue;
+            }
+
+            var processName = Path.GetFileNameWithoutExtension(applicationPath);
+            if (IsProcessRunningInSession(processName, gameSessionId))
+            {
+                logger.LogDebug(
+                    "AutoStart process is already running in session {SessionId}: {ProcessName}",
+                    gameSessionId,
+                    processName);
+                continue;
+            }
+
+            try
+            {
+                var startedProcessId = PInvoke.StartInteractiveProcess(
+                    applicationPath,
+                    gameSessionId,
+                    logger);
+                if (!startedProcessId.HasValue)
+                {
+                    continue;
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+                if (IsProcessRunningInSession(processName, gameSessionId))
+                {
+                    logger.LogInformation(
+                        "Started interactive application {Path} as process {ProcessId} in user session {SessionId}",
+                        applicationPath,
+                        startedProcessId.Value,
+                        gameSessionId);
+                }
+                else
+                {
+                    logger.LogWarning(
+                        "Interactive application {Path} was created as process {ProcessId} in session {SessionId}, but exited immediately",
+                        applicationPath,
+                        startedProcessId.Value,
+                        gameSessionId);
+                }
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                logger.LogError(exception, "Failed to start interactive application: {Path}", applicationPath);
+            }
+        }
     }
 
-    private bool IsGreaterWindows8()
+    private void KillConfiguredProcesses(IEnumerable<string> processNames)
     {
-        return IsWindowsVersionOrGreater(6, 2, 0);
+        foreach (var configuredName in processNames.Where(x => !string.IsNullOrWhiteSpace(x)))
+        {
+            var processName = NormalizeProcessName(configuredName);
+            foreach (var process in Process.GetProcessesByName(processName))
+            {
+                using (process)
+                {
+                    try
+                    {
+                        var processId = process.Id;
+                        process.Kill(entireProcessTree: false);
+                        if (process.WaitForExit(milliseconds: 5000))
+                        {
+                            logger.LogInformation(
+                                "Stopped process {ProcessName} ({ProcessId})",
+                                processName,
+                                processId);
+                        }
+                        else
+                        {
+                            logger.LogWarning(
+                                "Process {ProcessName} ({ProcessId}) did not exit within 5 seconds",
+                                processName,
+                                processId);
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        logger.LogWarning(
+                            exception,
+                            "Could not stop process {ProcessName} ({ProcessId})",
+                            processName,
+                            process.Id);
+                    }
+                }
+            }
+        }
     }
 
-
-    private bool IsWindowsVersionOrGreater(int major, int minor, int build)
+    private void LimitConfiguredProcesses(IEnumerable<string> processNames)
     {
-        var osVersion = Environment.OSVersion.Version;
-        return (osVersion.Major > major) ||
-               (osVersion.Major == major && osVersion.Minor > minor) ||
-               (osVersion.Major == major && osVersion.Minor == minor && osVersion.Build >= build);
+        foreach (var configuredName in processNames.Where(x => !string.IsNullOrWhiteSpace(x)))
+        {
+            var processName = NormalizeProcessName(configuredName);
+            foreach (var process in Process.GetProcessesByName(processName))
+            {
+                using (process)
+                {
+                    try
+                    {
+                        SetLastAllowedCpuAffinity(process);
+                        PInvoke.SetIoPriority(process.Id, logger);
+                    }
+                    catch (Exception exception)
+                    {
+                        logger.LogWarning(
+                            exception,
+                            "Could not limit process {ProcessName} ({ProcessId})",
+                            processName,
+                            process.Id);
+                    }
+                }
+            }
+        }
     }
+
+    private void StopConfiguredApplications(
+        IEnumerable<string> processNames,
+        int gameSessionId)
+    {
+        foreach (var configuredName in processNames.Where(x => !string.IsNullOrWhiteSpace(x)))
+        {
+            var processName = NormalizeProcessName(configuredName);
+            foreach (var process in Process.GetProcessesByName(processName))
+            {
+                using (process)
+                {
+                    try
+                    {
+                        if (process.SessionId != gameSessionId)
+                        {
+                            continue;
+                        }
+
+                        var processId = process.Id;
+                        process.Kill(entireProcessTree: false);
+                        if (process.WaitForExit(milliseconds: 5000))
+                        {
+                            logger.LogInformation(
+                                "Stopped auto-start application {ProcessName} ({ProcessId}) after the game exited",
+                                processName,
+                                processId);
+                        }
+                        else
+                        {
+                            logger.LogWarning(
+                                "Auto-start application {ProcessName} ({ProcessId}) did not exit within 5 seconds",
+                                processName,
+                                processId);
+                        }
+                    }
+                    catch (Exception exception)
+                    {
+                        logger.LogWarning(
+                            exception,
+                            "Could not stop auto-start application {ProcessName} ({ProcessId}) after the game exited",
+                            processName,
+                            process.Id);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void SetLastAllowedCpuAffinity(Process process)
+    {
+        var affinity = unchecked((ulong)process.ProcessorAffinity.ToInt64());
+        if (affinity == 0)
+        {
+            return;
+        }
+
+        var highestBit = 63 - System.Numerics.BitOperations.LeadingZeroCount(affinity);
+        process.ProcessorAffinity = new IntPtr(unchecked((long)(1UL << highestBit)));
+    }
+
+    private static Process? FindGameProcess(string normalizedName)
+    {
+        var processes = Process.GetProcessesByName(normalizedName);
+        Process? selected = null;
+
+        foreach (var process in processes)
+        {
+            if (selected is not null)
+            {
+                process.Dispose();
+                continue;
+            }
+
+            try
+            {
+                if (process.SessionId > 0 && !process.HasExited)
+                {
+                    selected = process;
+                }
+                else
+                {
+                    process.Dispose();
+                }
+            }
+            catch
+            {
+                process.Dispose();
+            }
+        }
+
+        return selected;
+    }
+
+    private static bool IsProcessRunningInSession(
+        string configuredName,
+        int sessionId,
+        int? requiredProcessId = null)
+    {
+        var processes = Process.GetProcessesByName(NormalizeProcessName(configuredName));
+        try
+        {
+            foreach (var process in processes)
+            {
+                try
+                {
+                    if (process.SessionId == sessionId &&
+                        (!requiredProcessId.HasValue || process.Id == requiredProcessId.Value))
+                    {
+                        return true;
+                    }
+                }
+                catch
+                {
+                    // The process may exit while it is being inspected.
+                }
+            }
+
+            return false;
+        }
+        finally
+        {
+            foreach (var process in processes)
+            {
+                process.Dispose();
+            }
+        }
+    }
+
+    private static string NormalizeProcessName(string configuredName) =>
+        Path.GetFileNameWithoutExtension(configuredName.Trim());
+
+    private sealed record DetectedGame(
+        Process Process,
+        string ProcessName,
+        int ProcessId,
+        int SessionId);
 }
-

@@ -1,286 +1,326 @@
-﻿using System.Runtime.InteropServices;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
 
-namespace AutoManagerProcess
+namespace AutoManagerProcess;
+
+public static class PInvoke
 {
-    public static class PInvoke
+    private const uint MaximumAllowed = 0x02000000;
+    private const uint CreateUnicodeEnvironment = 0x00000400;
+    private const int SecurityImpersonation = 2;
+    private const int TokenPrimary = 1;
+
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WTSQueryUserToken(uint sessionId, out IntPtr token);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DuplicateTokenEx(
+        IntPtr existingToken,
+        uint desiredAccess,
+        IntPtr tokenAttributes,
+        int impersonationLevel,
+        int tokenType,
+        out IntPtr newToken);
+
+    [DllImport("userenv.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateEnvironmentBlock(
+        out IntPtr environment,
+        IntPtr token,
+        [MarshalAs(UnmanagedType.Bool)] bool inherit);
+
+    [DllImport("userenv.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DestroyEnvironmentBlock(IntPtr environment);
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateProcessAsUserW(
+        IntPtr token,
+        string applicationName,
+        string? commandLine,
+        IntPtr processAttributes,
+        IntPtr threadAttributes,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandles,
+        uint creationFlags,
+        IntPtr environment,
+        string? currentDirectory,
+        ref StartupInfo startupInfo,
+        out ProcessInformation processInformation);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(
+        ProcessAccessFlags processAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        int processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetProcessInformation(
+        IntPtr process,
+        ProcessInformationClass informationClass,
+        ref ProcessPowerThrottlingState information,
+        uint informationSize);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtSetInformationProcess(
+        IntPtr process,
+        int informationClass,
+        ref IoPriorityHintInformation information,
+        int informationLength);
+
+    public static int? StartInteractiveProcess(
+        string applicationPath,
+        int sessionId,
+        ILogger logger)
     {
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern uint WTSGetActiveConsoleSessionId();
-
-        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-        public static extern bool CreateProcessAsUser(
-            IntPtr hToken,
-            string lpApplicationName,
-            string lpCommandLine,
-            IntPtr lpProcessAttributes,
-            IntPtr lpThreadAttributes,
-            bool bInheritHandles,
-            uint dwCreationFlags,
-            IntPtr lpEnvironment,
-            string lpCurrentDirectory,
-            [In] ref STARTUPINFO lpStartupInfo,
-            out PROCESS_INFORMATION lpProcessInformation);
-
-        [DllImport("wtsapi32.dll", SetLastError = true)]
-        public static extern bool WTSQueryUserToken(uint SessionId, out IntPtr phToken);
-
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        public static extern bool DuplicateTokenEx(
-            IntPtr hExistingToken,
-            uint dwDesiredAccess,
-            IntPtr lpTokenAttributes,
-            int ImpersonationLevel,
-            int TokenType,
-            out IntPtr phNewToken);
-
-        [DllImport("advapi32.dll", SetLastError = true)]
-        public static extern bool AdjustTokenPrivileges(
-            IntPtr TokenHandle,
-            bool DisableAllPrivileges,
-            ref TOKEN_PRIVILEGES NewState,
-            uint BufferLength,
-            IntPtr PreviousState,
-            IntPtr ReturnLength);
-
-
-        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Auto)]
-        private static extern bool LookupPrivilegeValue(string lpSystemName, string lpName, ref PInvoke.LUID lpLuid);
-
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct STARTUPINFO
+        if (!WTSQueryUserToken((uint)sessionId, out var userToken))
         {
-            public uint cb;
-            public string lpReserved;
-            public string lpDesktop;
-            public string lpTitle;
-            public uint dwX;
-            public uint dwY;
-            public uint dwXSize;
-            public uint dwYSize;
-            public uint dwXCountChars;
-            public uint dwYCountChars;
-            public uint dwFillAttribute;
-            public uint dwFlags;
-            public ushort wShowWindow;
-            public ushort cbReserved2;
-            public IntPtr lpReserved2;
-            public IntPtr hStdInput;
-            public IntPtr hStdOutput;
-            public IntPtr hStdError;
+            logger.LogError(
+                new Win32Exception(Marshal.GetLastWin32Error()),
+                "Could not obtain the user token for session {SessionId}",
+                sessionId);
+            return null;
         }
 
-        [StructLayout(LayoutKind.Sequential)]
-        public struct PROCESS_INFORMATION
+        var primaryToken = IntPtr.Zero;
+        var environment = IntPtr.Zero;
+        try
         {
-            public IntPtr hProcess;
-            public IntPtr hThread;
-            public uint dwProcessId;
-            public uint dwThreadId;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct LUID
-        {
-            public uint LowPart;
-            public int HighPart;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct LUID_AND_ATTRIBUTES
-        {
-            public LUID Luid;
-            public uint Attributes;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct TOKEN_PRIVILEGES
-        {
-            public uint PrivilegeCount;
-            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 1)]
-            public LUID_AND_ATTRIBUTES[] Privileges;
-        }
-
-        private const uint SE_PRIVILEGE_ENABLED = 0x00000002;
-        private const string SE_ASSIGNPRIMARYTOKEN_NAME = "SeAssignPrimaryTokenPrivilege";
-        private const string SE_INCREASE_QUOTA_NAME = "SeIncreaseQuotaPrivilege";
-
-
-        public static void StartInteractiveProcess(string applicationPath, ILogger logger)
-        {
-
-            uint sessionId = WTSGetActiveConsoleSessionId();
-            if (sessionId == 0xFFFFFFFF)
+            if (!DuplicateTokenEx(
+                    userToken,
+                    MaximumAllowed,
+                    IntPtr.Zero,
+                    SecurityImpersonation,
+                    TokenPrimary,
+                    out primaryToken))
             {
-                logger.LogError("No active session found.");
-                return;
+                logger.LogError(
+                    new Win32Exception(Marshal.GetLastWin32Error()),
+                    "Could not create a primary user token for session {SessionId}",
+                    sessionId);
+                return null;
             }
 
-            if (!WTSQueryUserToken(sessionId, out IntPtr userToken))
+            var creationFlags = 0u;
+            if (CreateEnvironmentBlock(out environment, primaryToken, inherit: false))
             {
-                logger.LogError("Could not get user token.");
-                return;
+                creationFlags |= CreateUnicodeEnvironment;
+            }
+            else
+            {
+                logger.LogWarning(
+                    new Win32Exception(Marshal.GetLastWin32Error()),
+                    "Could not load the user environment for session {SessionId}; starting with the service environment",
+                    sessionId);
             }
 
-            IntPtr duplicatedToken = IntPtr.Zero;
-            if (!DuplicateTokenEx(userToken, 0xF01FF, IntPtr.Zero, 2, 1, out duplicatedToken))
+            var startupInfo = new StartupInfo
             {
-                logger.LogError("Could not duplicate token.");
-                return;
-            }
-
-            SetPrivilege(duplicatedToken, SE_ASSIGNPRIMARYTOKEN_NAME, true);
-            SetPrivilege(duplicatedToken, SE_INCREASE_QUOTA_NAME, true);
-
-            STARTUPINFO startupInfo = new STARTUPINFO();
-            PROCESS_INFORMATION processInfo = new PROCESS_INFORMATION();
-
-            bool result = CreateProcessAsUser(
-                duplicatedToken,
-                null,
-                applicationPath,
-                IntPtr.Zero,
-                IntPtr.Zero,
-                false,
-                0,
-                IntPtr.Zero,
-                null,
-                ref startupInfo,
-                out processInfo);
-
-            if (!result)
-            {
-                logger.LogError("Could not create process.");
-            }
-        }
-
-        private static void SetPrivilege(IntPtr token, string privilege, bool enable)
-        {
-            LUID luid = new LUID();
-            if (!LookupPrivilegeValue(null, privilege, ref luid))
-            {
-                throw new Exception("Could not lookup privilege value.");
-            }
-
-            TOKEN_PRIVILEGES tp = new TOKEN_PRIVILEGES
-            {
-                PrivilegeCount = 1,
-                Privileges = new LUID_AND_ATTRIBUTES[1]
+                Size = (uint)Marshal.SizeOf<StartupInfo>(),
+                Desktop = @"winsta0\default"
             };
-            tp.Privileges[0].Luid = luid;
-            tp.Privileges[0].Attributes = enable ? SE_PRIVILEGE_ENABLED : 0;
 
-            if (!AdjustTokenPrivileges(token, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero))
+            if (!CreateProcessAsUserW(
+                    primaryToken,
+                    applicationPath,
+                    null,
+                    IntPtr.Zero,
+                    IntPtr.Zero,
+                    inheritHandles: false,
+                    creationFlags,
+                    environment,
+                    Path.GetDirectoryName(applicationPath),
+                    ref startupInfo,
+                    out var processInformation))
             {
-                throw new Exception("Could not adjust token privileges.");
-            }
-        }
-
-
-        public enum IoPriorityHint
-        {
-            IoPriorityVeryLow = 0, 
-            IoPriorityLow = 1,   
-            IoPriorityNormal = 2, 
-            IoPriorityHigh = 3
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct IO_PRIORITY_HINT
-        {
-            public IoPriorityHint Priority;
-        }
-
-        [DllImport("ntdll.dll", SetLastError = true)]
-        private static extern int NtSetInformationProcess(IntPtr ProcessHandle, int ProcessInformationClass, ref IO_PRIORITY_HINT ProcessInformation, int ProcessInformationLength);
-
-        public static void SetIoPriority(int processId, ILogger logger)
-        {
-            IntPtr hProcess = OpenProcess(ProcessAccessFlags.SetInformation, false, processId);
-            if (hProcess == IntPtr.Zero)
-            {
-                logger.LogError("cannot open process");
-                return;
+                logger.LogError(
+                    new Win32Exception(Marshal.GetLastWin32Error()),
+                    "Could not start {ApplicationPath} in user session {SessionId}",
+                    applicationPath,
+                    sessionId);
+                return null;
             }
 
             try
             {
-                IO_PRIORITY_HINT ioPriorityHint = new IO_PRIORITY_HINT { Priority = IoPriorityHint.IoPriorityVeryLow };
-                int result = NtSetInformationProcess(hProcess, 0x21, ref ioPriorityHint, Marshal.SizeOf(ioPriorityHint));
-                if (result != 0)
-                {
-                    logger.LogError($"{processId}:无法设置I/O优先级");
-                }
-                logger.LogInformation($"{processId}:设置I/0优先级成功");
+                return checked((int)processInformation.ProcessId);
             }
             finally
             {
-                CloseHandle(hProcess);
+                CloseHandle(processInformation.Thread);
+                CloseHandle(processInformation.Process);
             }
         }
-
-        public static void SetEfficiencyMode(int processId, ILogger logger)
+        finally
         {
-            IntPtr hProcess = OpenProcess(ProcessAccessFlags.SetInformation, false, processId);
-            if (hProcess == IntPtr.Zero)
+            if (environment != IntPtr.Zero)
             {
-                logger.LogError("cannot open process");
-                return;
+                DestroyEnvironmentBlock(environment);
             }
 
-            PROCESS_POWER_THROTTLING_STATE state = new PROCESS_POWER_THROTTLING_STATE
+            if (primaryToken != IntPtr.Zero)
             {
-                Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-                ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
-                StateMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+                CloseHandle(primaryToken);
+            }
+
+            CloseHandle(userToken);
+        }
+    }
+
+    public static bool SetIoPriority(int processId, ILogger logger)
+    {
+        var process = OpenProcess(ProcessAccessFlags.SetInformation, inheritHandle: false, processId);
+        if (process == IntPtr.Zero)
+        {
+            logger.LogWarning(
+                new Win32Exception(Marshal.GetLastWin32Error()),
+                "Could not open process {ProcessId} to set its I/O priority",
+                processId);
+            return false;
+        }
+
+        try
+        {
+            var information = new IoPriorityHintInformation
+            {
+                Priority = IoPriorityHint.VeryLow
+            };
+            var status = NtSetInformationProcess(
+                process,
+                informationClass: 0x21,
+                ref information,
+                Marshal.SizeOf(information));
+
+            if (status != 0)
+            {
+                logger.LogWarning(
+                    "Could not set very-low I/O priority for process {ProcessId}; NTSTATUS 0x{Status:X8}",
+                    processId,
+                    status);
+                return false;
+            }
+
+            logger.LogInformation("Set very-low I/O priority for process {ProcessId}", processId);
+            return true;
+        }
+        finally
+        {
+            CloseHandle(process);
+        }
+    }
+
+    public static bool SetEfficiencyMode(int processId, ILogger logger)
+    {
+        var process = OpenProcess(ProcessAccessFlags.SetInformation, inheritHandle: false, processId);
+        if (process == IntPtr.Zero)
+        {
+            logger.LogWarning(
+                new Win32Exception(Marshal.GetLastWin32Error()),
+                "Could not open process {ProcessId} to enable efficiency mode",
+                processId);
+            return false;
+        }
+
+        try
+        {
+            var state = new ProcessPowerThrottlingState
+            {
+                Version = 1,
+                ControlMask = 0x1,
+                StateMask = 0x1
             };
 
-            try
+            if (!SetProcessInformation(
+                    process,
+                    ProcessInformationClass.ProcessPowerThrottling,
+                    ref state,
+                    (uint)Marshal.SizeOf(state)))
             {
-                bool result = SetProcessInformation(hProcess, PROCESS_INFORMATION_CLASS.ProcessPowerThrottling, ref state, (uint)Marshal.SizeOf(state));
-                if (!result)
-                {
-                    logger.LogError("无法设置效率模式");
-                }
-                logger.LogInformation("设置效率模式成功");
+                logger.LogWarning(
+                    new Win32Exception(Marshal.GetLastWin32Error()),
+                    "Could not enable efficiency mode for process {ProcessId}",
+                    processId);
+                return false;
             }
-            finally
-            {
-                CloseHandle(hProcess);
-            }
+
+            logger.LogInformation("Enabled efficiency mode for process {ProcessId}", processId);
+            return true;
         }
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern IntPtr OpenProcess(ProcessAccessFlags processAccess, bool bInheritHandle, int processId);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern bool CloseHandle(IntPtr hObject);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        static extern bool SetProcessInformation(IntPtr hProcess, PROCESS_INFORMATION_CLASS processInformationClass, ref PROCESS_POWER_THROTTLING_STATE processInformation, uint processInformationSize);
-
-        [StructLayout(LayoutKind.Sequential)]
-        struct PROCESS_POWER_THROTTLING_STATE
+        finally
         {
-            public uint Version;
-            public uint ControlMask;
-            public uint StateMask;
+            CloseHandle(process);
         }
+    }
 
-        enum PROCESS_INFORMATION_CLASS
-        {
-            ProcessPowerThrottling = 24
-        }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct StartupInfo
+    {
+        public uint Size;
+        public string? Reserved;
+        public string? Desktop;
+        public string? Title;
+        public uint X;
+        public uint Y;
+        public uint XSize;
+        public uint YSize;
+        public uint XCountChars;
+        public uint YCountChars;
+        public uint FillAttribute;
+        public uint Flags;
+        public ushort ShowWindow;
+        public ushort Reserved2Length;
+        public IntPtr Reserved2;
+        public IntPtr StandardInput;
+        public IntPtr StandardOutput;
+        public IntPtr StandardError;
+    }
 
-        const uint PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1;
-        const uint PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1;
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInformation
+    {
+        public IntPtr Process;
+        public IntPtr Thread;
+        public uint ProcessId;
+        public uint ThreadId;
+    }
 
+    private enum IoPriorityHint
+    {
+        VeryLow = 0,
+        Low = 1,
+        Normal = 2,
+        High = 3
+    }
 
-        [Flags]
-        enum ProcessAccessFlags : uint
-        {
-            SetInformation = 0x0200
-        }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoPriorityHintInformation
+    {
+        public IoPriorityHint Priority;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessPowerThrottlingState
+    {
+        public uint Version;
+        public uint ControlMask;
+        public uint StateMask;
+    }
+
+    private enum ProcessInformationClass
+    {
+        ProcessPowerThrottling = 4
+    }
+
+    [Flags]
+    private enum ProcessAccessFlags : uint
+    {
+        SetInformation = 0x0200
     }
 }
