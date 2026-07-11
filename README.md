@@ -1,4 +1,6 @@
-# AutoManagerProcess 使用说明
+# DNF Process Manager
+
+检测 DNF 生命周期，自动管理连发工具、游戏进程优先级和后台进程的 Windows 服务。
 
 这个程序会在检测到 DNF 启动后，自动完成下面的事情：
 
@@ -14,22 +16,23 @@
 
 请保持下面这些文件在同一个目录中：
 
-- `AutoManagerProcess.exe`：服务主程序。
+- `DNFProcessManager.exe`：服务主程序。
 - `服务管理.bat`：一步安装并启动服务，也可以停止、重启或卸载。
 - `appsettings.json`：服务配置文件。
 - `DNFAutoFire.exe`：连发程序。
 - `config.ini`：连发程序的按键和预设配置。
 - `DNF专用工具箱8.0.bat`：清理或禁用游戏目录中的无用组件。
 
-不要只复制 `AutoManagerProcess.exe`。缺少配置文件或连发程序时，对应功能不会工作。
+不要只复制 `DNFProcessManager.exe`。缺少配置文件或连发程序时，对应功能不会工作。
 
 ## 第一次使用
 
-1. 默认发布目录是项目下的 `publish` 文件夹。需要指定其他目录时，可执行 `dotnet publish -p:PublishDir="D:\目标目录\"`。请保持发布目录中的文件完整，不要只移动主程序。
-2. 双击 `服务管理.bat`。
-3. 出现 Windows 权限提示时选择“是”。
-4. 在菜单中选择“1. 安装或更新并启动服务”。
-5. 看到“服务已安装或更新，并已启动”后，正常启动 DNF。
+![快速使用说明](docs/images/quick-start.png)
+
+1. 将 `DNF专用工具箱8.0.bat` 复制到游戏根目录，双击运行后按照提示禁用游戏插件。
+2. 运行 `服务管理.bat`，按照提示安装服务。
+
+默认发布目录是项目下的 `publish` 文件夹。需要指定其他目录时，可执行 `dotnet publish -p:PublishDir="D:\目标目录\"`。请保持发布目录中的文件完整，不要只移动主程序。
 
 当服务检测到 `DNF.exe` 后，会自动启动同目录下的 `DNFAutoFire.exe`。如果连发程序已经运行，不会重复启动第二个。
 
@@ -151,7 +154,7 @@
 
 ### AutoStart
 
-随 DNF 自动启动的程序。相对路径以 `AutoManagerProcess.exe` 所在目录为基准，因此默认写法不依赖安装位置：
+随 DNF 自动启动的程序。相对路径以 `DNFProcessManager.exe` 所在目录为基准，因此默认写法不依赖安装位置：
 
 ```json
 "AutoStart": [ "DNFAutoFire.exe" ]
@@ -231,7 +234,7 @@ DNF 关闭后需要自动关闭的程序。默认只关闭连发程序：
 
 ### 启动游戏后连发没有打开
 
-- 确认 `DNFAutoFire.exe` 与 `AutoManagerProcess.exe` 在同一个目录。
+- 确认 `DNFAutoFire.exe` 与 `DNFProcessManager.exe` 在同一个目录。
 - 确认 `AutoStart` 中写的是 `"DNFAutoFire.exe"`。
 - 使用服务管理脚本查看服务是否处于 `RUNNING` 状态。
 - 查看 `logs` 文件夹中的最新日志。
@@ -241,7 +244,7 @@ DNF 关闭后需要自动关闭的程序。默认只关闭连发程序：
 
 - 确认整个发布目录文件完整。
 - 重新运行 `服务管理.bat`，选择“安装或更新并启动服务”。
-- 不要在服务运行时移动或删除 `AutoManagerProcess.exe`。
+- 不要在服务运行时移动或删除 `DNFProcessManager.exe`。
 
 ### appsettings.json 保存后报错
 

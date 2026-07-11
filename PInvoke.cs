@@ -1,7 +1,7 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 
-namespace AutoManagerProcess;
+namespace DNFProcessManager;
 
 public static class PInvoke
 {

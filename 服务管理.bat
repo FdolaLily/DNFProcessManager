@@ -1,11 +1,12 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 chcp 936 >nul
-title AutoManagerProcess 服务管理
+title DNF Process Manager 服务管理
 
-set "SERVICE_NAME=AutoManagerProcess"
-set "DISPLAY_NAME=Auto Manager Process"
-set "EXE_PATH=%~dp0AutoManagerProcess.exe"
+set "SERVICE_NAME=DNFProcessManager"
+set "LEGACY_SERVICE_NAME=AutoManagerProcess"
+set "DISPLAY_NAME=DNF Process Manager"
+set "EXE_PATH=%~dp0DNFProcessManager.exe"
 
 if /i "%~1"=="--self-test" goto :self_test
 
@@ -18,7 +19,7 @@ if errorlevel 1 (
 :menu
 cls
 echo ============================================================
-echo AutoManagerProcess Windows 服务管理
+echo DNF Process Manager Windows 服务管理
 echo 程序路径：!EXE_PATH!
 echo ============================================================
 echo 1. 安装或更新并启动服务
@@ -38,10 +39,17 @@ if errorlevel 1 goto :install
 goto :menu
 
 :install
+sc.exe query "!LEGACY_SERVICE_NAME!" >nul 2>&1
+if not errorlevel 1 (
+    echo [迁移] 正在移除旧版 AutoManagerProcess 服务...
+    sc.exe stop "!LEGACY_SERVICE_NAME!" >nul 2>&1
+    sc.exe delete "!LEGACY_SERVICE_NAME!" >nul 2>&1
+    timeout.exe /t 2 /nobreak >nul
+)
 if not exist "!EXE_PATH!" (
     echo.
     echo [错误] 找不到 !EXE_PATH!
-    echo 请将本脚本与发布输出中的 AutoManagerProcess.exe 放在同一目录。
+    echo 请将本脚本与发布输出中的 DNFProcessManager.exe 放在同一目录。
     goto :pause_menu
 )
 if not exist "%~dp0DNFAutoFire.exe" echo [警告] 未找到 DNFAutoFire.exe，游戏启动时不会自动运行连发程序。
@@ -142,7 +150,7 @@ goto :menu
 
 :self_test
 set "FAILED=0"
-for %%F in ("AutoManagerProcess.exe" "appsettings.json" "DNFAutoFire.exe" "config.ini" "DNF专用工具箱8.0.bat" "服务管理.bat") do (
+for %%F in ("DNFProcessManager.exe" "appsettings.json" "DNFAutoFire.exe" "config.ini" "DNF专用工具箱8.0.bat" "服务管理.bat") do (
     if not exist "%~dp0%%~F" (
         echo MISSING: %%~F
         set "FAILED=1"

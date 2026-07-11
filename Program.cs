@@ -1,4 +1,4 @@
-using AutoManagerProcess;
+using DNFProcessManager;
 using Serilog;
 
 
@@ -26,7 +26,7 @@ builder.Services.AddSerilog(c =>
 
 builder.Services.AddWindowsService(o =>
 {
-    o.ServiceName = "Auto Manager Process";
+    o.ServiceName = "DNF Process Manager";
 });
 
 builder.Services

@@ -1,6 +1,6 @@
 using System.Diagnostics;
 
-namespace AutoManagerProcess;
+namespace DNFProcessManager;
 
 public sealed class ManagerOptions
 {

@@ -2,7 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using Microsoft.Extensions.Options;
 
-namespace AutoManagerProcess;
+namespace DNFProcessManager;
 
 public sealed class Worker(
     ILogger<Worker> logger,
