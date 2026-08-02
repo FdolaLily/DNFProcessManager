@@ -1,6 +1,11 @@
 using DNFProcessManager;
 using Serilog;
 
+if (LauncherCloseHelper.TryHandle(args, out var helperExitCode))
+{
+    Environment.ExitCode = helperExitCode;
+    return;
+}
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -39,6 +44,7 @@ builder.Services
     .ValidateOnStart();
 
 builder.Services.AddHostedService<Worker>();
+builder.Services.AddHostedService<LauncherMonitor>();
 
 var host = builder.Build();
 await host.RunAsync();

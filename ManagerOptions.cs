@@ -12,6 +12,8 @@ public sealed class ManagerOptions
 
     public int ActionDelaySeconds { get; set; } = 60;
 
+    public bool CloseLauncherIfGameNotStarted { get; set; } = true;
+
     public bool OptimizeGamePriority { get; set; } = true;
 
     public string GamePriority { get; set; } = nameof(ProcessPriorityClass.AboveNormal);
