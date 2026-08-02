@@ -9,6 +9,7 @@
 - 将 DNF 保持在安全的“高于正常”CPU 优先级，减少后台程序争抢 CPU 时的卡顿。
 - 等待一段时间后，关闭配置中指定的多余进程。
 - 降低指定后台进程的资源占用。
+- DNF 启动器打开一分钟后仍未启动游戏时，向启动器发送正常关闭请求。
 
 程序以 Windows 服务方式运行，不会显示普通窗口。发布版已经包含 .NET 运行环境，用户不需要另外安装 .NET。
 
@@ -45,6 +46,7 @@
 3. 重启服务：修改配置后可以使用。
 4. 查看完整状态：检查服务是否正在运行、启动方式和程序路径。
 5. 卸载服务：删除 Windows 服务，但不会删除当前目录中的文件。
+6. 切换启动器超时关闭：服务运行时也会立即生效，不需要重启。
 
 如果需要移动整个程序目录，请先卸载服务，移动文件后再重新安装。否则 Windows 仍会寻找旧位置的 EXE。
 
@@ -72,6 +74,7 @@
     "ProcessName": "DNF.exe",
     "ProcessPollSeconds": 2,
     "ActionDelaySeconds": 60,
+    "CloseLauncherIfGameNotStarted": true,
     "OptimizeGamePriority": true,
     "GamePriority": "AboveNormal",
     "LimitList": [
@@ -118,6 +121,16 @@
 ```
 
 如果电脑启动游戏较慢，可以改为 `90`；不建议设置得太低。
+
+### CloseLauncherIfGameNotStarted
+
+默认开启。服务会动态识别 DNF 启动器；如果启动器打开一分钟后仍未检测到同一用户会话中的 `DNF.exe`，就向启动器发送正常的窗口关闭请求，不会强制结束进程：
+
+```json
+"CloseLauncherIfGameNotStarted": true
+```
+
+不需要这项功能时，可以在 `appsettings.json` 中改为 `false`，也可以在服务管理脚本中切换。保存后会在服务运行期间立即生效，不需要重启服务。启动器安装路径和版本目录不需要写入配置。
 
 ### OptimizeGamePriority 和 GamePriority
 

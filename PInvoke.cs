@@ -78,7 +78,8 @@ public static class PInvoke
     public static int? StartInteractiveProcess(
         string applicationPath,
         int sessionId,
-        ILogger logger)
+        ILogger logger,
+        string? arguments = null)
     {
         if (!WTSQueryUserToken((uint)sessionId, out var userToken))
         {
@@ -127,10 +128,14 @@ public static class PInvoke
                 Desktop = @"winsta0\default"
             };
 
+            var commandLine = string.IsNullOrWhiteSpace(arguments)
+                ? null
+                : $"\"{applicationPath}\" {arguments}";
+
             if (!CreateProcessAsUserW(
                     primaryToken,
                     applicationPath,
-                    null,
+                    commandLine,
                     IntPtr.Zero,
                     IntPtr.Zero,
                     inheritHandles: false,

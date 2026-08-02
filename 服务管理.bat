@@ -7,6 +7,7 @@ set "SERVICE_NAME=DNFProcessManager"
 set "LEGACY_SERVICE_NAME=AutoManagerProcess"
 set "DISPLAY_NAME=DNF Process Manager"
 set "EXE_PATH=%~dp0DNFProcessManager.exe"
+set "CONFIG_PATH=%~dp0appsettings.json"
 
 if /i "%~1"=="--self-test" goto :self_test
 
@@ -18,6 +19,10 @@ if errorlevel 1 (
 
 :menu
 cls
+set "LAUNCHER_MONITOR_STATUS=未知"
+if exist "!CONFIG_PATH!" (
+    for /f "usebackq delims=" %%S in (`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$j = Get-Content -Raw -LiteralPath $env:CONFIG_PATH ^| ConvertFrom-Json; $p = $j.Manager.PSObject.Properties['CloseLauncherIfGameNotStarted']; if ($null -eq $p -or [bool]$p.Value) { '已开启' } else { '已关闭' }" 2^>nul`) do set "LAUNCHER_MONITOR_STATUS=%%S"
+)
 echo ============================================================
 echo DNF Process Manager Windows 服务管理
 echo 程序路径：!EXE_PATH!
@@ -27,16 +32,28 @@ echo 2. 停止服务
 echo 3. 重启服务
 echo 4. 查看完整状态
 echo 5. 卸载服务
-echo 6. 退出
+echo 6. 切换“启动超时后关闭 DNF 启动器”（当前：!LAUNCHER_MONITOR_STATUS!）
+echo 7. 退出
 echo.
-choice /c 123456 /n /m "请选择："
-if errorlevel 6 goto :end
+choice /c 1234567 /n /m "请选择："
+if errorlevel 7 goto :end
+if errorlevel 6 goto :toggle_launcher_monitor
 if errorlevel 5 goto :uninstall
 if errorlevel 4 goto :status
 if errorlevel 3 goto :restart
 if errorlevel 2 goto :stop
 if errorlevel 1 goto :install
 goto :menu
+
+:toggle_launcher_monitor
+if not exist "!CONFIG_PATH!" (
+    echo [错误] 找不到 !CONFIG_PATH!
+    goto :pause_menu
+)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$path = [IO.Path]::GetFullPath($env:CONFIG_PATH); $suffix = [Guid]::NewGuid().ToString('N'); $temp = $path + '.' + $suffix + '.tmp'; $backup = $path + '.' + $suffix + '.bak'; try { $json = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json; if ($null -eq $json.Manager) { throw '配置中缺少 Manager 节。' }; $property = $json.Manager.PSObject.Properties['CloseLauncherIfGameNotStarted']; $enabled = $null -eq $property -or [bool]$property.Value; $next = -not $enabled; if ($null -eq $property) { $json.Manager | Add-Member -NotePropertyName CloseLauncherIfGameNotStarted -NotePropertyValue $next } else { $json.Manager.CloseLauncherIfGameNotStarted = $next }; $text = ($json | ConvertTo-Json -Depth 20) + [Environment]::NewLine; [IO.File]::WriteAllText($temp, $text, [Text.UTF8Encoding]::new($false)); [IO.File]::Replace($temp, $path, $backup); Remove-Item -LiteralPath $backup -Force; if ($next) { Write-Host '[完成] 功能已开启，运行中的服务将立即读取新配置。' } else { Write-Host '[完成] 功能已关闭，运行中的服务将立即停止此项监控。' } } catch { Write-Error $_; exit 1 } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }; if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force } }"
+if errorlevel 1 echo [失败] 无法更新配置，请检查 appsettings.json 格式和文件权限。
+goto :pause_menu
 
 :install
 sc.exe query "!LEGACY_SERVICE_NAME!" >nul 2>&1
@@ -157,6 +174,7 @@ for %%F in ("DNFProcessManager.exe" "appsettings.json" "DNFAutoFire.exe" "config
     )
 )
 sc.exe query EventLog >nul 2>&1 || set "FAILED=1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$j = Get-Content -Raw -LiteralPath $env:CONFIG_PATH | ConvertFrom-Json; if ($j.Manager.CloseLauncherIfGameNotStarted -isnot [bool]) { exit 1 }" >nul 2>&1 || set "FAILED=1"
 if "!FAILED!"=="1" (
     echo SELF-TEST FAILED.
     endlocal
