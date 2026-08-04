@@ -75,41 +75,78 @@ public sealed class LauncherMonitor(
                     group.Key.ExecutablePath);
             }
 
-            if (IsProcessRunningInSession(gameProcessName, group.Key.SessionId))
+            var gameIsRunning = IsProcessRunningInSession(gameProcessName, group.Key.SessionId);
+            if (gameIsRunning)
             {
                 state.GameWasObserved = true;
             }
 
-            if (state.CloseRequested ||
-                state.GameWasObserved ||
-                now < state.NextCloseAttemptAt ||
-                now - state.StartedAt < GameStartTimeout)
+            var closeReason = DetermineCloseReason(
+                state.GameWasObserved,
+                gameIsRunning,
+                now - state.StartedAt);
+
+            if (closeReason == LauncherCloseReason.None)
             {
                 continue;
             }
 
-            var closeRequested = RequestGracefulClose(
-                group.Select(x => x.ProcessId),
-                group.Key.SessionId);
-
-            if (closeRequested)
+            if (now < state.NextCloseAttemptAt)
             {
-                state.CloseRequested = true;
-                logger.LogInformation(
-                    "Requested graceful close of DNF launcher in user session {SessionId} because {GameProcessName} did not start within one minute: {Path}",
-                    group.Key.SessionId,
-                    NormalizeProcessName(gameProcessName),
-                    group.Key.ExecutablePath);
+                continue;
+            }
+
+            state.NextCloseAttemptAt = now.AddSeconds(10);
+            var stoppedCount = ForceStopVerifiedLaunchers(group, group.Key);
+            if (stoppedCount > 0)
+            {
+                if (closeReason == LauncherCloseReason.GameExited)
+                {
+                    logger.LogInformation(
+                        "Terminated {ProcessCount} verified DNF launcher process(es) in user session {SessionId} after {GameProcessName} exited: {Path}",
+                        stoppedCount,
+                        group.Key.SessionId,
+                        NormalizeProcessName(gameProcessName),
+                        group.Key.ExecutablePath);
+                }
+                else
+                {
+                    logger.LogInformation(
+                        "Terminated {ProcessCount} verified DNF launcher process(es) in user session {SessionId} because {GameProcessName} did not start within one minute: {Path}",
+                        stoppedCount,
+                        group.Key.SessionId,
+                        NormalizeProcessName(gameProcessName),
+                        group.Key.ExecutablePath);
+                }
             }
             else
             {
-                state.NextCloseAttemptAt = now.AddSeconds(10);
                 logger.LogWarning(
-                    "DNF launcher exceeded the one-minute game-start timeout, but the graceful close request could not be dispatched in user session {SessionId}; it will retry: {Path}",
+                    "DNF launcher should be terminated, but no process passed the final identity check in user session {SessionId}; it will retry: {Path}",
                     group.Key.SessionId,
                     group.Key.ExecutablePath);
             }
         }
+    }
+
+    internal static LauncherCloseReason DetermineCloseReason(
+        bool gameWasObserved,
+        bool gameIsRunning,
+        TimeSpan launcherUptime)
+    {
+        if (gameIsRunning)
+        {
+            return LauncherCloseReason.None;
+        }
+
+        if (gameWasObserved)
+        {
+            return LauncherCloseReason.GameExited;
+        }
+
+        return launcherUptime >= GameStartTimeout
+            ? LauncherCloseReason.GameStartTimedOut
+            : LauncherCloseReason.None;
     }
 
     private static List<LauncherProcess> FindDnfLauncherProcesses()
@@ -214,32 +251,39 @@ public sealed class LauncherMonitor(
         return false;
     }
 
-    private bool RequestGracefulClose(IEnumerable<int> processIds, int sessionId)
+    private static int ForceStopVerifiedLaunchers(
+        IEnumerable<LauncherProcess> candidates,
+        LauncherKey expectedKey)
     {
-        try
+        var stoppedCount = 0;
+        foreach (var candidate in candidates)
         {
-            var executablePath = Environment.ProcessPath;
-            if (string.IsNullOrWhiteSpace(executablePath))
+            try
             {
-                return false;
-            }
+                using var process = Process.GetProcessById(candidate.ProcessId);
+                var executablePath = process.MainModule?.FileName;
+                if (process.HasExited ||
+                    process.SessionId != expectedKey.SessionId ||
+                    string.IsNullOrWhiteSpace(executablePath) ||
+                    !Path.GetFullPath(executablePath).Equals(
+                        expectedKey.ExecutablePath,
+                        StringComparison.OrdinalIgnoreCase) ||
+                    new DateTimeOffset(process.StartTime.ToUniversalTime()) != candidate.StartedAt ||
+                    !IsDnfLauncherExecutable(executablePath))
+                {
+                    continue;
+                }
 
-            var arguments = string.Join(' ', processIds.Select(x => x.ToString()));
-            if (arguments.Length == 0)
+                process.Kill(entireProcessTree: false);
+                stoppedCount++;
+            }
+            catch
             {
-                return false;
+                // The process may exit while its identity is being revalidated.
             }
+        }
 
-            return PInvoke.StartInteractiveProcess(
-                executablePath,
-                sessionId,
-                logger,
-                $"--close-launcher-window {arguments}").HasValue;
-        }
-        catch
-        {
-            return false;
-        }
+        return stoppedCount;
     }
 
     private static bool IsProcessRunningInSession(string configuredName, int sessionId)
@@ -279,6 +323,12 @@ public sealed class LauncherMonitor(
         public DateTimeOffset StartedAt { get; } = startedAt;
         public DateTimeOffset NextCloseAttemptAt { get; set; }
         public bool GameWasObserved { get; set; }
-        public bool CloseRequested { get; set; }
     }
+}
+
+internal enum LauncherCloseReason
+{
+    None,
+    GameStartTimedOut,
+    GameExited
 }

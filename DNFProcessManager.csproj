@@ -9,7 +9,7 @@
     <RootNamespace>DNFProcessManager</RootNamespace>
     <Product>DNF Process Manager</Product>
     <Description>Windows service that automates DNF companion tools, process priority, and background process management.</Description>
-    <Version>1.1.0</Version>
+    <Version>1.1.1</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>

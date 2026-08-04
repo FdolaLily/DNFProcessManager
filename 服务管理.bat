@@ -32,7 +32,7 @@ echo 2. 停止服务
 echo 3. 重启服务
 echo 4. 查看完整状态
 echo 5. 卸载服务
-echo 6. 切换“启动超时后关闭 DNF 启动器”（当前：!LAUNCHER_MONITOR_STATUS!）
+echo 6. 切换“自动关闭 DNF 启动器”（当前：!LAUNCHER_MONITOR_STATUS!）
 echo 7. 退出
 echo.
 choice /c 1234567 /n /m "请选择："

@@ -1,12 +1,6 @@
 using DNFProcessManager;
 using Serilog;
 
-if (LauncherCloseHelper.TryHandle(args, out var helperExitCode))
-{
-    Environment.ExitCode = helperExitCode;
-    return;
-}
-
 var builder = Host.CreateApplicationBuilder(args);
 
 builder.Configuration
