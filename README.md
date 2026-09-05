@@ -250,6 +250,25 @@ DNF 关闭后需要自动关闭的程序。默认只关闭连发程序：
 
 ## 更新程序
 
+### GitHub 自动编译与发布
+
+仓库的 Actions 工作流 **Build and release Windows package** 会在 PR 和主分支更新时检查编译与打包，生成的测试包在该次 Actions 运行的 Artifacts 中保留 7 天。
+
+发布新版本时，给需要发布的提交推送版本标签，例如：
+
+```powershell
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+工作流会自动编译 Windows x64 独立运行版本、运行服务脚本和工具箱自检，然后创建对应 Release 并上传 `DNFProcessManager-v1.2.0-win-x64.zip` 和 `.zip.sha256` 校验文件。程序版本号从标签读取，不需要提前修改项目文件中的版本号。`v1.2.0-beta.1` 这类标签会发布为预发布版本。
+
+也可以在 GitHub 的 Releases 页面选择新标签并发布 Release，工作流会为该版本补上安装包。如果需要重新编译已有标签，进入 **Actions → Build and release Windows package → Run workflow**，选择 `master`，在 `tag` 中填写完整标签。留空只编译测试包，不创建 Release。重复运行会替换同名 ZIP 和校验文件，保留已有 Release 的说明。
+
+自动打包使用仓库中已提交的连发程序和配置。发布前应先提交需要包含的修改；本机未提交文件不会进入发布包。工作流使用 GitHub 自带令牌，无需另行配置个人令牌。
+
+### 安装新版
+
 1. 使用服务管理脚本停止服务。
 2. 备份自己修改过的 `appsettings.json` 和 `config.ini`。
 3. 替换发布目录中的文件。
