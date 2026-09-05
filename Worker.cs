@@ -194,6 +194,8 @@ public sealed class Worker(
                 {
                     try
                     {
+                        // PriorityClass is cached; refresh before checking for external changes.
+                        gameProcess.Refresh();
                         var previousPriority = gameProcess.PriorityClass;
                         if (previousPriority != targetPriority)
                         {

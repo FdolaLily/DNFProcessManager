@@ -14,7 +14,7 @@ builder.Services.AddSerilog(c =>
         .File(
             Path.Combine(AppContext.BaseDirectory, "logs", "auto-manager.log"),
             rollingInterval: RollingInterval.Infinite,
-            fileSizeLimitBytes: 2 * 1024 * 1024,
+            fileSizeLimitBytes: 128 * 1024,
             rollOnFileSizeLimit: true,
             retainedFileCountLimit: 1,
             shared: true)
